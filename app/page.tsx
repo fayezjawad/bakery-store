@@ -2,8 +2,9 @@
 
 import { useEffect, useState } from "react";
 import Link from "next/link";
-import { supabase } from "../lib/supabase";
-import { addToCart, cartCount } from "../lib/cart";
+import { useRouter } from "next/navigation";
+import { supabase } from "@/lib/supabase";
+import { addToCart, bindCartToUser, cartCount } from "@/lib/cart";
 
 type Product = {
   id: number;
@@ -15,60 +16,47 @@ type Product = {
 };
 
 export default function HomePage() {
+  const router = useRouter();
   const [products, setProducts] = useState<Product[]>([]);
   const [email, setEmail] = useState<string | null>(null);
   const [role, setRole] = useState<string | null>(null);
-  const [userId, setUserId] = useState<string | null>(null);
-
   const [count, setCount] = useState(0);
-  const [err, setErr] = useState<string | null>(null);
 
-  const refreshCount = (uid?: string | null) => setCount(cartCount(uid ?? null));
+  const refreshCount = () => setCount(cartCount());
 
   useEffect(() => {
-    const onUpdate = () => refreshCount(userId);
+    refreshCount();
+    const onUpdate = () => refreshCount();
     window.addEventListener("cart_updated", onUpdate);
     return () => window.removeEventListener("cart_updated", onUpdate);
-  }, [userId]);
+  }, []);
 
   useEffect(() => {
     (async () => {
-      setErr(null);
-
       const { data: s } = await supabase.auth.getSession();
       const user = s.session?.user ?? null;
 
       setEmail(user?.email ?? null);
-      setUserId(user?.id ?? null);
+      bindCartToUser(user?.id ?? null);
 
       if (user) {
-        const { data: pr, error: prErr } = await supabase
+        const { data: pr } = await supabase
           .from("profiles")
           .select("role")
           .eq("id", user.id)
-          .single();
-
-        if (prErr) console.log("profiles error:", prErr);
+          .maybeSingle();
         setRole(pr?.role ?? null);
       } else {
         setRole(null);
       }
 
-      const { data, error } = await supabase
+      const { data } = await supabase
         .from("products")
         .select("id,name,description,price,currency,image_url")
         .eq("is_active", true)
         .order("created_at", { ascending: false });
 
-      if (error) {
-        console.log("products error:", error);
-        setErr(error.message);
-        setProducts([]);
-      } else {
-        setProducts((data ?? []) as any);
-      }
-
-      refreshCount(user?.id ?? null);
+      setProducts((data ?? []) as any);
     })();
   }, []);
 
@@ -76,9 +64,7 @@ export default function HomePage() {
     await supabase.auth.signOut();
     setEmail(null);
     setRole(null);
-    setUserId(null);
-    setCount(0);
-    window.location.assign("/");
+    router.refresh();
   };
 
   return (
@@ -92,13 +78,12 @@ export default function HomePage() {
               Cart ({count})
             </Link>
 
-            {/* ✅ الرابط الجديد */}
-            <Link className="hover:underline" href="/custom-cake">
-              Customize Cake
-            </Link>
-
             <Link className="hover:underline" href="/track">
               Track
+            </Link>
+
+            <Link className="hover:underline" href="/custom-cake">
+              Customize Cake
             </Link>
 
             {email ? (
@@ -139,25 +124,12 @@ export default function HomePage() {
       <main className="max-w-6xl mx-auto px-6 py-8">
         <h2 className="text-2xl font-semibold mb-4">Products</h2>
 
-        {err && (
-          <div className="mb-4 text-sm bg-white border rounded-xl p-3">
-            ❌ {err}
-          </div>
-        )}
-
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
           {products.map((p) => (
-            <div
-              key={p.id}
-              className="bg-white border rounded-2xl overflow-hidden shadow-sm"
-            >
+            <div key={p.id} className="bg-white border rounded-2xl overflow-hidden shadow-sm">
               {p.image_url ? (
                 // eslint-disable-next-line @next/next/no-img-element
-                <img
-                  src={p.image_url}
-                  alt={p.name}
-                  className="w-full h-40 object-cover"
-                />
+                <img src={p.image_url} alt={p.name} className="w-full h-40 object-cover" />
               ) : (
                 <div className="w-full h-40 bg-neutral-100" />
               )}
@@ -175,23 +147,14 @@ export default function HomePage() {
 
                 <button
                   onClick={() => {
-                    if (!userId) {
-                      window.location.assign("/login");
-                      return;
-                    }
-
-                    addToCart(
-                      {
-                        product_id: p.id,
-                        name: p.name,
-                        unit_price: Number(p.price),
-                        currency: "USD",
-                        image_url: p.image_url,
-                      },
-                      1,
-                      userId
-                    );
-                    refreshCount(userId);
+                    addToCart({
+                      product_id: p.id,
+                      name: p.name,
+                      unit_price: Number(p.price),
+                      currency: p.currency || "USD",
+                      image_url: p.image_url,
+                    });
+                    refreshCount();
                   }}
                   className="mt-3 w-full rounded-xl bg-neutral-900 text-white py-2.5 font-medium hover:bg-neutral-800"
                 >
@@ -201,7 +164,7 @@ export default function HomePage() {
             </div>
           ))}
 
-          {!products.length && !err && (
+          {!products.length && (
             <div className="text-sm text-neutral-600">No products yet.</div>
           )}
         </div>

@@ -2,63 +2,87 @@ export type CartItem = {
   product_id: number;
   name: string;
   unit_price: number;
-  currency: string; // USD
-  image_url?: string | null;
+  currency: string;
+  image_url: string | null;
   qty: number;
 };
 
-const GUEST_KEY = "bakery_cart_guest";
-const USER_KEY_PREFIX = "bakery_cart_user:";
+const CART_KEY = "bakery_cart_v1";
+const CART_OWNER_KEY = "bakery_cart_owner_v1";
 
-function safeParse(json: string | null) {
+function isBrowser() {
+  return typeof window !== "undefined";
+}
+
+function read(): CartItem[] {
+  if (!isBrowser()) return [];
   try {
-    return json ? (JSON.parse(json) as CartItem[]) : [];
+    const raw = localStorage.getItem(CART_KEY);
+    return raw ? (JSON.parse(raw) as CartItem[]) : [];
   } catch {
     return [];
   }
 }
 
-function keyFor(userId?: string | null) {
-  return userId ? `${USER_KEY_PREFIX}${userId}` : GUEST_KEY;
-}
-
-export function getCart(userId?: string | null): CartItem[] {
-  if (typeof window === "undefined") return [];
-  return safeParse(localStorage.getItem(keyFor(userId)));
-}
-
-export function saveCart(items: CartItem[], userId?: string | null) {
-  localStorage.setItem(keyFor(userId), JSON.stringify(items));
+function write(items: CartItem[]) {
+  if (!isBrowser()) return;
+  localStorage.setItem(CART_KEY, JSON.stringify(items));
   window.dispatchEvent(new Event("cart_updated"));
 }
 
-export function addToCart(
-  item: Omit<CartItem, "qty">,
-  qty = 1,
-  userId?: string | null
-) {
-  const cart = getCart(userId);
-  const idx = cart.findIndex((x) => x.product_id === item.product_id);
-  if (idx >= 0) cart[idx].qty += qty;
-  else cart.push({ ...item, qty });
-  saveCart(cart, userId);
+export function getCart(): CartItem[] {
+  return read();
 }
 
-export function setQty(product_id: number, qty: number, userId?: string | null) {
-  const cart = getCart(userId)
-    .map((x) => (x.product_id === product_id ? { ...x, qty } : x))
-    .filter((x) => x.qty > 0);
-  saveCart(cart, userId);
+export function cartCount(): number {
+  return read().reduce((sum, it) => sum + (it.qty || 0), 0);
 }
 
-export function clearCart(userId?: string | null) {
-  saveCart([], userId);
+export function addToCart(input: Omit<CartItem, "qty"> & { qty?: number }) {
+  const items = read();
+  const idx = items.findIndex((x) => x.product_id === input.product_id);
+  const qtyToAdd = input.qty ?? 1;
+
+  if (idx >= 0) {
+    items[idx] = { ...items[idx], qty: (items[idx].qty || 0) + qtyToAdd };
+  } else {
+    items.push({ ...input, qty: qtyToAdd });
+  }
+  write(items);
 }
 
-export function cartCount(userId?: string | null) {
-  return getCart(userId).reduce((sum, x) => sum + x.qty, 0);
+export function setQty(product_id: number, qty: number) {
+  const items = read().map((x) => (x.product_id === product_id ? { ...x, qty } : x));
+  const cleaned = items.filter((x) => (x.qty || 0) > 0);
+  write(cleaned);
 }
 
-export function cartTotal(userId?: string | null) {
-  return getCart(userId).reduce((sum, x) => sum + x.unit_price * x.qty, 0);
+export function clearCart() {
+  if (!isBrowser()) return;
+  localStorage.removeItem(CART_KEY);
+  window.dispatchEvent(new Event("cart_updated"));
+}
+
+/**
+ * ✅ اربط السلة بالمستخدم:
+ * - لو نفس المستخدم رجع دخل: السلة بتضل.
+ * - لو مستخدم مختلف دخل: نمسح السلة تلقائيًا.
+ */
+export function bindCartToUser(userId: string | null) {
+  if (!isBrowser()) return;
+
+  const owner = localStorage.getItem(CART_OWNER_KEY);
+
+  if (!userId) {
+    // مش مسجل دخول: لا نمسح السلة
+    return;
+  }
+
+  if (owner && owner !== userId) {
+    // مستخدم مختلف => امسح السلة
+    localStorage.removeItem(CART_KEY);
+  }
+
+  localStorage.setItem(CART_OWNER_KEY, userId);
+  window.dispatchEvent(new Event("cart_updated"));
 }
