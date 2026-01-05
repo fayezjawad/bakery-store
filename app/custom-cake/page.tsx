@@ -1,10 +1,9 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
-import Link from "next/link";
-import { supabase } from "../../lib/supabase";
-import { addToCart } from "../../lib/cart";
-
+import { useEffect, useMemo, useRef, useState } from "react";
+import Shell from "@/components/Shell";
+import { supabase } from "@/lib/supabase";
+import { addToCart } from "@/lib/cart";
 
 type Opt = {
   id: number;
@@ -29,21 +28,27 @@ export default function CustomCakePage() {
 
   const [message, setMessage] = useState("");
   const [qty, setQty] = useState(1);
-  const [err, setErr] = useState<string | null>(null);
+  const [rush, setRush] = useState(false);
 
-  // ✅ image upload
+  const [err, setErr] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+
+  // Optional image upload
   const [file, setFile] = useState<File | null>(null);
   const [preview, setPreview] = useState<string | null>(null);
-  const [saving, setSaving] = useState(false);
+  const fileRef = useRef<HTMLInputElement | null>(null);
 
   useEffect(() => {
     (async () => {
       const { data: s } = await supabase.auth.getSession();
       const u = s.session?.user;
+
+      // Redirect unauthenticated users to login (preserve return path)
       if (!u) {
-        window.location.assign("/login");
+        window.location.assign("/login?next=/custom-cake");
         return;
       }
+
       setUserId(u.id);
 
       const { data, error } = await supabase
@@ -68,6 +73,7 @@ export default function CustomCakePage() {
       setFillings(fiList);
       setToppings(tList);
 
+      // Preselect first options (if any)
       setSizeId(sList[0]?.id ?? null);
       setFlavorId(fList[0]?.id ?? null);
       setFillingId(fiList[0]?.id ?? null);
@@ -76,6 +82,7 @@ export default function CustomCakePage() {
   }, []);
 
   useEffect(() => {
+    // Build a local preview URL when a file is selected
     if (!file) {
       setPreview(null);
       return;
@@ -87,46 +94,83 @@ export default function CustomCakePage() {
 
   const find = (list: Opt[], id: number | null) => list.find((x) => x.id === id);
 
+  const selectedSize = useMemo(() => find(sizes, sizeId), [sizes, sizeId]);
+  const selectedFlavor = useMemo(() => find(flavors, flavorId), [flavors, flavorId]);
+  const selectedFilling = useMemo(() => find(fillings, fillingId), [fillings, fillingId]);
+  const selectedTopping = useMemo(() => find(toppings, toppingId), [toppings, toppingId]);
+
   const unitPrice = useMemo(() => {
-    const s = Number(find(sizes, sizeId)?.price ?? 0);
-    const f = Number(find(flavors, flavorId)?.price ?? 0);
-    const fi = Number(find(fillings, fillingId)?.price ?? 0);
-    const t = Number(find(toppings, toppingId)?.price ?? 0);
-    return s + f + fi + t;
-  }, [sizes, flavors, fillings, toppings, sizeId, flavorId, fillingId, toppingId]);
+    const s = Number(selectedSize?.price ?? 0);
+    const f = Number(selectedFlavor?.price ?? 0);
+    const fi = Number(selectedFilling?.price ?? 0);
+    const t = Number(selectedTopping?.price ?? 0);
+
+    // Example rush fee (customize as needed)
+    const rushFee = rush ? 5 : 0;
+
+    return s + f + fi + t + rushFee;
+  }, [selectedSize, selectedFlavor, selectedFilling, selectedTopping, rush]);
+
+  const estimated = useMemo(() => unitPrice * Math.max(1, qty), [unitPrice, qty]);
 
   const title = useMemo(() => {
-    const s = find(sizes, sizeId)?.name ?? "—";
-    const f = find(flavors, flavorId)?.name ?? "—";
-    const fi = find(fillings, fillingId)?.name ?? "—";
-    const t = find(toppings, toppingId)?.name ?? "—";
+    const s = selectedSize?.name ?? "—";
+    const f = selectedFlavor?.name ?? "—";
+    const fi = selectedFilling?.name ?? "—";
+    const t = selectedTopping?.name ?? "—";
     const msg = message.trim() ? ` | Msg: "${message.trim()}"` : "";
-    return `Custom Cake: ${s} / ${f} / ${fi} / ${t}${msg}`;
-  }, [sizes, flavors, fillings, toppings, sizeId, flavorId, fillingId, toppingId, message]);
+    const rushTxt = rush ? " | Rush" : "";
+    return `Custom Cake: ${s} / ${f} / ${fi} / ${t}${rushTxt}${msg}`;
+  }, [selectedSize, selectedFlavor, selectedFilling, selectedTopping, message, rush]);
 
   const uploadImage = async () => {
+    // No file selected
     if (!file) return null;
 
-    const ext = file.name.split(".").pop() || "jpg";
-    const path = `${Date.now()}-${Math.random().toString(16).slice(2)}.${ext}`;
+    // Validate mime type
+    const allowed = ["image/jpeg", "image/png", "image/webp"];
+    if (!allowed.includes(file.type)) {
+      throw new Error("Please upload a JPG, PNG, or WEBP image.");
+    }
 
-    const { error: upErr } = await supabase.storage
-      .from("custom-cake-images")
-      .upload(path, file, { upsert: false });
+    // Validate size (2MB max)
+    const maxBytes = 2 * 1024 * 1024;
+    if (file.size > maxBytes) {
+      throw new Error("Image is too large. Max size is 2MB.");
+    }
+
+    // Create a stable unique filename
+    const ext = (file.name.split(".").pop() || "jpg").toLowerCase();
+    const id =
+      (typeof crypto !== "undefined" && "randomUUID" in crypto && crypto.randomUUID()) ||
+      `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+
+    // Organize files under a user folder to reduce collisions
+    const folder = userId ? `${userId}` : "anonymous";
+    const path = `${folder}/${id}.${ext}`;
+
+    const { error: upErr } = await supabase.storage.from("custom-cake-images").upload(path, file, {
+      upsert: false,
+      contentType: file.type,
+      cacheControl: "3600",
+    });
 
     if (upErr) throw upErr;
 
+    // Return a public URL (make sure bucket policy allows it)
     const { data } = supabase.storage.from("custom-cake-images").getPublicUrl(path);
-    return data.publicUrl; // ✅ public URL
+    return data.publicUrl;
   };
 
   const add = async () => {
     if (!userId) return;
+
     setSaving(true);
+    setErr(null);
+
     try {
       const imageUrl = await uploadImage();
 
-      // Save full selections in DB
       const { error } = await supabase.from("custom_cakes").insert({
         user_id: userId,
         size_id: sizeId,
@@ -134,153 +178,272 @@ export default function CustomCakePage() {
         filling_id: fillingId,
         topping_id: toppingId,
         message,
-        qty,
+        qty: Math.max(1, qty),
         unit_price: unitPrice,
         currency: "USD",
         image_url: imageUrl,
+        rush,
       });
 
       if (error) throw error;
 
-      // Add to cart as special item (negative id)
-      const fakeId = -Date.now();
+      // Client-side cart item id (negative to avoid collisions with real product IDs)
+      const clientId = -Date.now();
 
-      addToCart(
-        {
-          product_id: fakeId,
-          name: title,
-          unit_price: unitPrice,
-          currency: "USD",
-          image_url: imageUrl, // ✅ تظهر في السلة
-        },
-        Math.max(1, qty),
-        userId
-      );
+      addToCart({
+        product_id: clientId,
+        name: title,
+        unit_price: unitPrice,
+        currency: "USD",
+        image_url: imageUrl,
+        qty: Math.max(1, qty),
+      });
 
+      // Go to cart after adding
       window.location.assign("/cart");
     } catch (e: any) {
-      alert(`❌ ${e.message}`);
+      setErr(e.message);
     } finally {
       setSaving(false);
     }
   };
 
-  if (err) {
-    return (
-      <div className="min-h-screen bg-neutral-50 flex items-center justify-center">
-        <div className="bg-white border rounded-xl p-4 text-sm">❌ {err}</div>
-      </div>
-    );
-  }
+  const inputCls =
+    "w-full rounded-2xl px-4 py-3 bg-white/5 border border-white/10 outline-none focus:border-white/20";
+  const selectCls =
+    "w-full rounded-2xl px-4 py-3 bg-white/5 border border-white/10 outline-none focus:border-white/20";
 
   return (
-    <div className="min-h-screen bg-neutral-50">
-      <header className="px-6 py-4 bg-white border-b">
-        <div className="max-w-3xl mx-auto flex items-center justify-between">
-          <div className="font-bold">Customize Cake</div>
-          <div className="flex gap-3 text-sm">
-            <Link className="hover:underline" href="/">Home</Link>
-            <Link className="hover:underline" href="/cart">Cart</Link>
-          </div>
-        </div>
-      </header>
+    <Shell title="Build Your Cake" subtitle="Customize your cake and see live pricing." max="max-w-6xl">
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+        {/* LEFT: FORM */}
+        <div className="dc-card p-6">
+          {err && (
+            <div className="dc-card-strong p-4 mb-4 text-sm">
+              ❌ {err}
+            </div>
+          )}
 
-      <main className="max-w-3xl mx-auto px-6 py-8">
-        <div className="bg-white border rounded-2xl p-5 space-y-4">
-          <Field label="Size">
-            <Select value={sizeId ?? ""} onChange={(v) => setSizeId(Number(v))} options={sizes} />
-          </Field>
+          <div className="space-y-4">
+            <Field label="Size">
+              <select
+                className={selectCls}
+                value={sizeId ?? ""}
+                onChange={(e) => setSizeId(Number(e.target.value))}
+              >
+                {sizes.map((x) => (
+                  <option key={x.id} value={x.id}>
+                    {x.name}
+                    {Number(x.price) ? ` (+$${Number(x.price).toFixed(2)})` : ""}
+                  </option>
+                ))}
+              </select>
+            </Field>
 
-          <Field label="Flavor">
-            <Select value={flavorId ?? ""} onChange={(v) => setFlavorId(Number(v))} options={flavors} />
-          </Field>
+            <Field label="Flavor">
+              <select
+                className={selectCls}
+                value={flavorId ?? ""}
+                onChange={(e) => setFlavorId(Number(e.target.value))}
+              >
+                {flavors.map((x) => (
+                  <option key={x.id} value={x.id}>
+                    {x.name}
+                    {Number(x.price) ? ` (+$${Number(x.price).toFixed(2)})` : ""}
+                  </option>
+                ))}
+              </select>
+            </Field>
 
-          <Field label="Filling">
-            <Select value={fillingId ?? ""} onChange={(v) => setFillingId(Number(v))} options={fillings} />
-          </Field>
+            <Field label="Filling">
+              <select
+                className={selectCls}
+                value={fillingId ?? ""}
+                onChange={(e) => setFillingId(Number(e.target.value))}
+              >
+                {fillings.map((x) => (
+                  <option key={x.id} value={x.id}>
+                    {x.name}
+                    {Number(x.price) ? ` (+$${Number(x.price).toFixed(2)})` : ""}
+                  </option>
+                ))}
+              </select>
+            </Field>
 
-          <Field label="Topping">
-            <Select value={toppingId ?? ""} onChange={(v) => setToppingId(Number(v))} options={toppings} />
-          </Field>
+            <Field label="Frosting">
+              <select
+                className={selectCls}
+                value={toppingId ?? ""}
+                onChange={(e) => setToppingId(Number(e.target.value))}
+              >
+                {toppings.map((x) => (
+                  <option key={x.id} value={x.id}>
+                    {x.name}
+                    {Number(x.price) ? ` (+$${Number(x.price).toFixed(2)})` : ""}
+                  </option>
+                ))}
+              </select>
+            </Field>
 
-          <Field label="Cake message (optional)">
-            <input
-              className="w-full border rounded-xl px-3 py-2"
-              value={message}
-              onChange={(e) => setMessage(e.target.value)}
-            />
-          </Field>
+            <Field label="Cake Message (optional)">
+              <input
+                className={inputCls}
+                value={message}
+                onChange={(e) => setMessage(e.target.value)}
+                placeholder="e.g., Happy Graduation!"
+              />
+            </Field>
 
-          <Field label="Upload image (optional)">
-            <input
-              type="file"
-              accept="image/*"
-              onChange={(e) => setFile(e.target.files?.[0] ?? null)}
-            />
+            <div className="flex items-center gap-3">
+              <input
+                id="rush"
+                type="checkbox"
+                checked={rush}
+                onChange={(e) => setRush(e.target.checked)}
+                className="h-4 w-4 rounded border-white/20 bg-white/5"
+              />
+              <label htmlFor="rush" className="text-sm">
+                Rush order (ready in 2 hours) <span className="dc-muted">(+ $5)</span>
+              </label>
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              <Field label="Quantity">
+                <input
+                  type="number"
+                  min={1}
+                  className={inputCls}
+                  value={qty}
+                  onChange={(e) => setQty(Number(e.target.value))}
+                />
+              </Field>
+
+              {/* Styled file picker (avoids the browser default "Choose File / No file chosen" UI) */}
+              <Field label="Upload image (optional)">
+                <div className="rounded-2xl border border-white/10 bg-white/5 px-4 py-3 flex items-center justify-between gap-3">
+                  <div className="min-w-0">
+                    <div className="text-sm text-white/85 truncate">
+                      {file ? file.name : "No file selected"}
+                    </div>
+                    <div className="text-xs text-white/50 mt-0.5">
+                      JPG, PNG, WEBP • Max 2MB
+                    </div>
+                  </div>
+
+                  <div className="flex items-center gap-2 shrink-0">
+                    {file && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setFile(null);
+                          // Reset input value so selecting the same file again triggers onChange
+                          if (fileRef.current) fileRef.current.value = "";
+                        }}
+                        className="px-3 py-2 rounded-xl border border-white/10 bg-white/5 hover:bg-white/10 transition text-sm"
+                      >
+                        Remove
+                      </button>
+                    )}
+
+                    <button
+                      type="button"
+                      onClick={() => fileRef.current?.click()}
+                      className="px-3 py-2 rounded-xl border border-white/10 bg-white/10 hover:bg-white/15 transition text-sm"
+                    >
+                      Choose
+                    </button>
+                  </div>
+
+                  <input
+                    ref={fileRef}
+                    type="file"
+                    accept="image/*"
+                    className="hidden"
+                    onChange={(e) => setFile(e.target.files?.[0] ?? null)}
+                  />
+                </div>
+              </Field>
+            </div>
+
             {preview && (
               // eslint-disable-next-line @next/next/no-img-element
-              <img src={preview} alt="preview" className="mt-3 h-40 w-full object-cover rounded-xl border" />
+              <img
+                src={preview}
+                alt="preview"
+                className="h-44 w-full object-cover rounded-2xl border border-white/10"
+              />
             )}
-          </Field>
 
-          <Field label="Quantity">
-            <input
-              type="number"
-              min={1}
-              className="w-full border rounded-xl px-3 py-2"
-              value={qty}
-              onChange={(e) => setQty(Number(e.target.value))}
-            />
-          </Field>
+            {/* Primary action button styled like your theme */}
+            <button
+              onClick={add}
+              disabled={saving}
+              className="w-full rounded-2xl py-3 font-semibold text-black disabled:opacity-60 transition hover:brightness-110 active:scale-[0.99]"
+              style={{
+                background:
+                  "linear-gradient(180deg, rgba(255,170,90,0.95), rgba(245,120,35,0.95))",
+                boxShadow: "0 10px 30px rgba(245,120,35,0.22)",
+              }}
+            >
+              {saving ? "Saving..." : "Add Custom Cake to Cart"}
+            </button>
+          </div>
+        </div>
 
-          <div className="border-t pt-4 flex items-center justify-between">
-            <div className="font-semibold">Unit Price</div>
-            <div className="font-bold">${unitPrice.toFixed(2)} USD</div>
+        {/* RIGHT: SUMMARY */}
+        <div className="dc-card p-6">
+          <div className="text-xl font-semibold mb-4">Summary</div>
+
+          <div className="rounded-2xl border border-white/10 bg-white/5 p-4">
+            <div
+              className="dc-muted text-sm"
+              style={{
+                borderStyle: "dashed",
+                borderWidth: 1,
+                borderColor: "rgba(255,255,255,.15)",
+                borderRadius: 16,
+                padding: 16,
+              }}
+            >
+              <div className="space-y-1">
+                <Row label="Size" value={selectedSize?.name ?? "—"} />
+                <Row label="Flavor" value={selectedFlavor?.name ?? "—"} />
+                <Row label="Filling" value={selectedFilling?.name ?? "—"} />
+                <Row label="Frosting" value={selectedTopping?.name ?? "—"} />
+                <Row label="Message" value={message.trim() ? message.trim() : "No message"} />
+                <Row label="Rush" value={rush ? "Yes" : "No"} />
+                <Row label="Qty" value={String(Math.max(1, qty))} />
+              </div>
+            </div>
           </div>
 
-          <button
-            onClick={add}
-            disabled={saving}
-            className="w-full rounded-xl bg-neutral-900 text-white py-2.5 font-medium hover:bg-neutral-800 disabled:opacity-60"
-          >
-            {saving ? "Saving..." : "Add custom cake to cart"}
-          </button>
+          <div className="mt-6">
+            <div className="text-lg font-semibold">Estimated Price</div>
+            <div className="mt-3 text-5xl font-extrabold tracking-tight">
+              ${estimated.toFixed(2)}
+            </div>
+            <div className="dc-muted mt-3">Price updates based on selected options.</div>
+          </div>
         </div>
-      </main>
-    </div>
+      </div>
+    </Shell>
   );
 }
 
-function Field({ label, children }: { label: string; children: any }) {
+function Field({ label, children }: { label: string; children: React.ReactNode }) {
   return (
     <div>
-      <label className="text-sm font-medium">{label}</label>
-      <div className="mt-1">{children}</div>
+      <div className="text-sm font-medium mb-2">{label}</div>
+      {children}
     </div>
   );
 }
 
-function Select({
-  value,
-  onChange,
-  options,
-}: {
-  value: any;
-  onChange: (v: string) => void;
-  options: Opt[];
-}) {
+function Row({ label, value }: { label: string; value: string }) {
   return (
-    <select
-      className="w-full border rounded-xl px-3 py-2"
-      value={value}
-      onChange={(e) => onChange(e.target.value)}
-    >
-      {options.map((x) => (
-        <option key={x.id} value={x.id}>
-          {x.name}
-          {Number(x.price) ? ` (+$${Number(x.price).toFixed(2)})` : ""}
-        </option>
-      ))}
-    </select>
+    <div className="flex items-baseline gap-2">
+      <div className="min-w-[90px] font-semibold text-white/80">{label}:</div>
+      <div className="text-white/85">{value}</div>
+    </div>
   );
 }
