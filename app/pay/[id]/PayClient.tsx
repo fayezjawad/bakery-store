@@ -132,7 +132,7 @@ export default function PayClient({ orderId }: { orderId: string }) {
       if (!res.ok) throw new Error(json?.error || "Payment failed.");
 
       // Redirect to HOME after successful payment
-      window.location.assign("/");
+      window.location.assign(`/invoice/${order.id}`);
     } catch (e: any) {
       setErr(e?.message || "Payment failed.");
     } finally {

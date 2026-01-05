@@ -1,71 +1,97 @@
-export const runtime = "nodejs";
-
 import { NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
 
+export const runtime = "nodejs";
+
+function getEnv(name: string) {
+  const v = process.env[name];
+  return v && v.trim() ? v.trim() : null;
+}
+
 export async function POST(req: Request) {
   try {
-    const body = await req.json().catch(() => null);
-    const orderId = body?.orderId as string | undefined;
-    const name = body?.name as string | undefined;
-    const last4 = body?.last4 as string | undefined;
+    const supabaseUrl = getEnv("NEXT_PUBLIC_SUPABASE_URL");
+    const serviceKey = getEnv("SUPABASE_SERVICE_ROLE_KEY");
 
-    if (!orderId || !name || !last4) {
-      return NextResponse.json({ error: "Missing fields" }, { status: 400 });
+    if (!supabaseUrl || !serviceKey) {
+      return NextResponse.json(
+        {
+          error:
+            "Missing env vars: NEXT_PUBLIC_SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY",
+        },
+        { status: 500 }
+      );
     }
 
     const auth = req.headers.get("authorization") || "";
-    const token = auth.startsWith("Bearer ") ? auth.slice(7) : "";
+    const token = auth.startsWith("Bearer ") ? auth.slice(7).trim() : "";
+
     if (!token) {
-      return NextResponse.json({ error: "Missing token" }, { status: 401 });
+      return NextResponse.json(
+        { error: "Missing Authorization Bearer token" },
+        { status: 401 }
+      );
     }
 
-    const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL!;
-    const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY!;
-    if (!supabaseUrl || !serviceKey) {
-      return NextResponse.json({ error: "Missing env vars" }, { status: 500 });
+    const admin = createClient(supabaseUrl, serviceKey, {
+      auth: { persistSession: false, autoRefreshToken: false },
+    });
+
+    const { data: userData, error: userErr } = await admin.auth.getUser(token);
+
+    if (userErr || !userData?.user) {
+      return NextResponse.json(
+        { error: "Invalid session. Please login again." },
+        { status: 401 }
+      );
     }
 
-    const admin = createClient(supabaseUrl, serviceKey);
+    const user = userData.user;
 
-   
-    const { data: userRes, error: userErr } = await admin.auth.getUser(token);
-    if (userErr || !userRes?.user) {
-      return NextResponse.json({ error: "Invalid token" }, { status: 401 });
+    const body = await req.json().catch(() => null);
+    const orderId = body?.orderId as string | undefined;
+    const name = (body?.name as string | undefined) ?? "";
+    const last4 = (body?.last4 as string | undefined) ?? "";
+
+    if (!orderId) {
+      return NextResponse.json({ error: "Missing orderId" }, { status: 400 });
     }
-    const userId = userRes.user.id;
-
-    
-    const { data: order, error: ordErr } = await admin
-      .from("orders")
-      .select("id,user_id,payment_status")
-      .eq("id", orderId)
-      .maybeSingle();
-
-    if (ordErr) return NextResponse.json({ error: ordErr.message }, { status: 400 });
-    if (!order) return NextResponse.json({ error: "Order not found" }, { status: 404 });
-    if (order.user_id !== userId) return NextResponse.json({ error: "Forbidden" }, { status: 403 });
-
-    if ((order.payment_status ?? "unpaid") === "paid") {
-      return NextResponse.json({ ok: true }, { status: 200 });
+    if (!name.trim()) {
+      return NextResponse.json({ error: "Name is required" }, { status: 400 });
+    }
+    if (!/^\d{4}$/.test(last4)) {
+      return NextResponse.json({ error: "Invalid last4" }, { status: 400 });
     }
 
-    
-    const { error: upErr } = await admin
+    // Update ONLY the user's order
+    const { data: updated, error: upErr } = await admin
       .from("orders")
       .update({
         payment_status: "paid",
         paid_at: new Date().toISOString(),
-        paid_method: "fake",
-        paid_last4: String(last4).slice(-4),
-        paid_name: String(name).slice(0, 120),
+        last4: last4,
+        paid_name: name.trim(),
       })
-      .eq("id", orderId);
+      .eq("id", orderId)
+      .eq("user_id", user.id)
+      .select("id")
+      .maybeSingle();
 
-    if (upErr) return NextResponse.json({ error: upErr.message }, { status: 400 });
+    if (upErr) {
+      return NextResponse.json({ error: upErr.message }, { status: 400 });
+    }
+    if (!updated) {
+      return NextResponse.json(
+        { error: "Order not found (or not yours)" },
+        { status: 404 }
+      );
+    }
 
-    return NextResponse.json({ ok: true }, { status: 200 });
+    return NextResponse.json({ ok: true });
   } catch (e: any) {
-    return NextResponse.json({ error: e?.message || "Unknown error" }, { status: 500 });
+    return NextResponse.json(
+      { error: e?.message || "Server error" },
+      { status: 500 }
+    );
   }
 }
