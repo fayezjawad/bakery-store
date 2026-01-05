@@ -2,241 +2,179 @@
 
 import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
-import { supabase } from "@/lib/supabase";
+import { useRouter } from "next/navigation";
 
-type Product = {
-  id: number;
-  name: string;
-  price: string;
-  currency: string;
+import { supabase } from "../../lib/supabase"; // ✅ عدّلها إذا مسارك مختلف
+import { clearCart, getCart, CartItem } from "../../lib/cart"; // ✅ عدّلها إذا مسارك مختلف
+
+type CreatedOrder = {
+  order_code: string;
+  pin: string;
+  last4: string | null;
+  status: string | null;
+  created_at: string;
 };
 
-type CartItem = { product: Product; qty: number };
-
 export default function CheckoutPage() {
-  const [products, setProducts] = useState<Product[]>([]);
-  const [cart, setCart] = useState<CartItem[]>([]);
-  const [customerName, setCustomerName] = useState("");
-  const [phone, setPhone] = useState("");
-  const [notes, setNotes] = useState("");
-  const [msg, setMsg] = useState<string | null>(null);
-  const [created, setCreated] = useState<any>(null);
+  const router = useRouter();
 
+  const [items, setItems] = useState<CartItem[]>([]);
+  const [last4, setLast4] = useState("");
+  const [loading, setLoading] = useState(false);
+
+  const [created, setCreated] = useState<CreatedOrder | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+
+  const total = useMemo(
+    () => items.reduce((s, x) => s + x.unit_price * x.qty, 0),
+    [items]
+  );
+
+  // ✅ حماية: لازم يكون مسجل دخول
   useEffect(() => {
     (async () => {
+      const { data } = await supabase.auth.getSession();
+      if (!data.session) {
+        router.replace("/login?next=/checkout");
+        return;
+      }
+      setItems(getCart());
+    })();
+  }, [router]);
+
+  const placeOrder = async () => {
+    setLoading(true);
+    setErr(null);
+    setCreated(null);
+
+    try {
       const { data: s } = await supabase.auth.getSession();
-      if (!s.session) {
-        location.href = "/login";
+      const user = s.session?.user;
+      if (!user) {
+        router.replace("/login?next=/checkout");
         return;
       }
 
-      const { data } = await supabase
-        .from("products")
-        .select("id,name,price,currency")
-        .eq("is_active", true)
-        .order("created_at", { ascending: false });
+      // ✅ انتبه: أنا بحط حقول “مؤكدة” عندك (order_code/pin بتتولد من DB trigger)
+      // لو عندك أعمدة إضافية (مثل user_id / total_amount / currency) تقدر تضيفها هنا
+      const insertPayload: any = {
+        // لو عندك user_id بالجدول:
+        // user_id: user.id,
 
-      setProducts((data ?? []) as any);
-    })();
-  }, []);
+        status: "created",
+        last4: last4.trim() ? last4.trim() : null,
 
-  const total = useMemo(() => {
-    return cart.reduce((sum, it) => sum + Number(it.product.price) * it.qty, 0);
-  }, [cart]);
+        // إذا عندك أعمدة total_amount/currency (عندك سابقًا كانوا مش موجودين) خليهم معلقين:
+        // total_amount: total,
+        // currency: "USD",
+      };
 
-  const addToCart = (p: Product) => {
-    setCart((prev) => {
-      const idx = prev.findIndex((x) => x.product.id === p.id);
-      if (idx >= 0) {
-        const copy = [...prev];
-        copy[idx] = { ...copy[idx], qty: copy[idx].qty + 1 };
-        return copy;
-      }
-      return [...prev, { product: p, qty: 1 }];
-    });
-  };
-
-  const setQty = (id: number, qty: number) => {
-    setCart((prev) => prev
-      .map((x) => (x.product.id === id ? { ...x, qty } : x))
-      .filter((x) => x.qty > 0)
-    );
-  };
-
-  const submitOrder = async () => {
-    setMsg(null);
-    setCreated(null);
-
-    const { data: s } = await supabase.auth.getSession();
-    const user = s.session?.user;
-    if (!user) {
-      setMsg("❌ لازم تسجل دخول");
-      return;
-    }
-    if (!cart.length) {
-      setMsg("❌ السلة فاضية");
-      return;
-    }
-
-    try {
-      // 1) Create order
-      const { data: order, error: oErr } = await supabase
+      const { data, error } = await supabase
         .from("orders")
-        .insert({
-          user_id: user.id,
-          customer_name: customerName,
-          phone,
-          total_price: total,
-          currency: "USD",
-          status: "new",
-          payment_status: "unpaid",
-          notes,
-        })
-        .select("id, order_code, tracking_pin, phone_last4, total_price, currency, status, created_at")
-        .single();
+        .insert(insertPayload)
+        .select("order_code,pin,last4,status,created_at")
+        .maybeSingle();
 
-      if (oErr) throw oErr;
+      if (error) throw error;
+      if (!data) throw new Error("Could not create order.");
 
-      // 2) Create items
-      const itemsPayload = cart.map((it) => ({
-        order_id: order.id,
-        item_type: "product",
-        product_id: it.product.id,
-        qty: it.qty,
-        unit_price: Number(it.product.price),
-      }));
+      setCreated(data as CreatedOrder);
 
-      const { error: iErr } = await supabase.from("order_items").insert(itemsPayload);
-      if (iErr) throw iErr;
-
-      setCreated(order);
-      setMsg("✅ Order created!");
-
+      // ✅ بعد إنشاء الطلب: فرّغ السلة
+      clearCart();
+      setItems([]);
     } catch (e: any) {
-      setMsg(`❌ ${e.message}`);
+      setErr(e?.message ?? "Unknown error");
+    } finally {
+      setLoading(false);
     }
   };
-
-  const waLink = useMemo(() => {
-    if (!created) return null;
-    const wa = process.env.NEXT_PUBLIC_BAKERY_WHATSAPP || "";
-    const base = process.env.NEXT_PUBLIC_APP_BASE_URL || "http://localhost:3000";
-    const text =
-      `New Order ✅\n` +
-      `Order Code: ${created.order_code}\n` +
-      `PIN: ${created.tracking_pin}\n` +
-      `Last4: ${created.phone_last4}\n` +
-      `Total: $${Number(created.total_price).toFixed(2)} ${created.currency}\n\n` +
-      `Track:\n${base}/track?code=${created.order_code}`;
-
-    return `https://wa.me/${wa}?text=${encodeURIComponent(text)}`;
-  }, [created]);
 
   return (
     <div className="min-h-screen bg-neutral-50">
       <header className="px-6 py-4 bg-white border-b">
-        <div className="max-w-5xl mx-auto flex items-center justify-between">
+        <div className="max-w-4xl mx-auto flex items-center justify-between">
           <div className="font-bold">Checkout</div>
           <div className="flex gap-3 text-sm">
-            <Link className="hover:underline" href="/">Home</Link>
-            <Link className="hover:underline" href="/my-orders">My Orders</Link>
+            <Link className="hover:underline" href="/">
+              Home
+            </Link>
+            <Link className="hover:underline" href="/cart">
+              Cart
+            </Link>
           </div>
         </div>
       </header>
 
-      <main className="max-w-5xl mx-auto px-6 py-8 grid grid-cols-1 lg:grid-cols-2 gap-6">
-        <section className="bg-white border rounded-2xl p-5">
-          <h3 className="font-semibold mb-3">Choose products</h3>
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-            {products.map((p) => (
-              <button
-                key={p.id}
-                onClick={() => addToCart(p)}
-                className="text-left border rounded-xl p-3 hover:bg-neutral-50"
-              >
-                <div className="font-medium">{p.name}</div>
-                <div className="text-sm text-neutral-600">
-                  ${Number(p.price).toFixed(2)} {p.currency}
-                </div>
-                <div className="text-xs text-neutral-500 mt-1">Click to add</div>
-              </button>
-            ))}
-          </div>
-        </section>
-
-        <section className="bg-white border rounded-2xl p-5">
-          <h3 className="font-semibold mb-3">Your cart</h3>
-
-          <div className="space-y-3">
-            {cart.map((it) => (
-              <div key={it.product.id} className="flex items-center justify-between border rounded-xl p-3">
-                <div>
-                  <div className="font-medium">{it.product.name}</div>
-                  <div className="text-sm text-neutral-600">
-                    ${Number(it.product.price).toFixed(2)} USD
+      <main className="max-w-4xl mx-auto px-6 py-8 space-y-4">
+        <div className="bg-white border rounded-2xl p-5">
+          {!items.length ? (
+            <div className="text-sm text-neutral-600">
+              السلة فاضية. روح للمنتجات واضف 👍
+            </div>
+          ) : (
+            <>
+              <div className="space-y-2">
+                {items.map((it) => (
+                  <div
+                    key={it.product_id}
+                    className="flex items-center justify-between text-sm border rounded-xl p-3"
+                  >
+                    <div className="font-medium">{it.name}</div>
+                    <div className="text-neutral-600">
+                      {it.qty} × ${it.unit_price.toFixed(2)}
+                    </div>
                   </div>
-                </div>
+                ))}
+              </div>
+
+              <div className="flex items-center justify-between border-t pt-4 mt-4">
+                <div className="font-bold">Total</div>
+                <div className="font-bold">${total.toFixed(2)} USD</div>
+              </div>
+
+              <div className="mt-4">
+                <div className="text-sm font-medium mb-1">Last 4 digits (اختياري)</div>
                 <input
-                  type="number"
-                  min={0}
-                  value={it.qty}
-                  onChange={(e) => setQty(it.product.id, Number(e.target.value))}
-                  className="w-20 border rounded-lg px-2 py-1"
+                  value={last4}
+                  onChange={(e) => setLast4(e.target.value)}
+                  placeholder="مثال: 3333"
+                  className="w-full border rounded-xl px-3 py-2"
                 />
               </div>
-            ))}
-            {!cart.length && <div className="text-sm text-neutral-600">Cart is empty.</div>}
-          </div>
-
-          <div className="mt-4 border-t pt-4">
-            <div className="font-bold">Total: ${total.toFixed(2)} USD</div>
-
-            <div className="mt-4 grid gap-3">
-              <div>
-                <label className="text-sm font-medium">Customer name</label>
-                <input className="w-full border rounded-xl px-3 py-2" value={customerName} onChange={(e) => setCustomerName(e.target.value)} />
-              </div>
-              <div>
-                <label className="text-sm font-medium">Phone</label>
-                <input className="w-full border rounded-xl px-3 py-2" value={phone} onChange={(e) => setPhone(e.target.value)} placeholder="+9665..." />
-              </div>
-              <div>
-                <label className="text-sm font-medium">Notes</label>
-                <textarea className="w-full border rounded-xl px-3 py-2" value={notes} onChange={(e) => setNotes(e.target.value)} />
-              </div>
 
               <button
-                onClick={submitOrder}
-                className="w-full rounded-xl bg-neutral-900 text-white py-2.5 font-medium hover:bg-neutral-800"
+                onClick={placeOrder}
+                disabled={loading}
+                className="mt-4 w-full rounded-xl bg-neutral-900 text-white py-2.5 font-medium hover:bg-neutral-800"
               >
-                Create Order
+                {loading ? "Placing order..." : "Place order"}
               </button>
+            </>
+          )}
+        </div>
 
-              {msg && <div className="text-sm bg-neutral-50 border rounded-xl p-3">{msg}</div>}
-
-              {created && (
-                <div className="bg-white border rounded-2xl p-4">
-                  <div className="font-semibold mb-2">Order created ✅</div>
-                  <div className="text-sm space-y-1">
-                    <div><b>Order Code:</b> {created.order_code}</div>
-                    <div><b>PIN:</b> {created.tracking_pin}</div>
-                    <div><b>Last4:</b> {created.phone_last4}</div>
-                  </div>
-
-                  {waLink && (
-                    <a
-                      href={waLink}
-                      target="_blank"
-                      className="mt-3 inline-block w-full text-center rounded-xl bg-green-600 text-white py-2.5 font-medium hover:bg-green-700"
-                    >
-                      Send summary on WhatsApp
-                    </a>
-                  )}
-                </div>
-              )}
-            </div>
+        {err && (
+          <div className="bg-white border rounded-2xl p-5 text-sm">
+            ❌ {err}
           </div>
-        </section>
+        )}
+
+        {created && (
+          <div className="bg-white border rounded-2xl p-5 space-y-2">
+            <div className="font-bold">Order created ✅</div>
+            <div className="text-sm">Order Code: <b>{created.order_code}</b></div>
+            <div className="text-sm">PIN: <b>{created.pin}</b></div>
+            <div className="text-sm">Last4: <b>{created.last4 ?? "----"}</b></div>
+
+            <Link
+              className="inline-block mt-3 px-4 py-2 rounded-xl bg-neutral-900 text-white hover:bg-neutral-800"
+              href={`/track?order=${created.order_code}&pin=${created.pin}`}
+            >
+              Track this order
+            </Link>
+          </div>
+        )}
       </main>
     </div>
   );
